@@ -1,3 +1,5 @@
+# tetromino.gd
+
 extends Node2D
 
 class_name Tetromino
@@ -16,13 +18,12 @@ var tetromino_data
 var is_next_piece
 var pieces = []
 var other_tetrominoes_pieces = [] 
-var ghost_tetromino
 
-@onready var timer = $Timer
 @onready var piece_scene = preload("res://Scenes/piece.tscn")
-@onready var ghost_tetromino_scene = preload("res://Scenes/ghost_tetromino.tscn")
 
 var tetromino_cells
+var is_dragging = false
+
 func _ready():
 	tetromino_cells = Shared.cells[tetromino_data.tetromino_type]
 	
@@ -36,85 +37,46 @@ func _ready():
 	if is_next_piece == false:
 		position = tetromino_data.spawn_position	
 		wall_kicks = Shared.wall_kicks_i if tetromino_data.tetromino_type == Shared.Tetromino.I else Shared.wall_kicks_jlostz
-		ghost_tetromino = ghost_tetromino_scene.instantiate() as GhostTetromino
-		ghost_tetromino.tetromino_data = tetromino_data
-		get_tree().root.add_child.call_deferred(ghost_tetromino)
-		hard_drop_ghost.call_deferred()
 	else: 
-		timer.stop()
 		set_process_input(false)
-		
 
-func hard_drop_ghost():
-	var final_hard_drop_position
-	var ghost_position_update = calculate_global_position(Vector2.DOWN, global_position)
-	
-	while ghost_position_update != null:
-		ghost_position_update = calculate_global_position(Vector2.DOWN, ghost_position_update)
-		if ghost_position_update != null:
-			final_hard_drop_position = ghost_position_update
-	
-	if final_hard_drop_position != null:
-		var children = get_children().filter(func (c): return c is Piece)
-		
-		var pieces_position = []
-		
-		for i in children.size():
-			var piece_position = children[i].position
-			pieces_position.append(piece_position)
-		
-		ghost_tetromino.set_ghost_tetromino(final_hard_drop_position, pieces_position)
-	
-	return final_hard_drop_position
+func _input(event):
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			if event.pressed:
+				is_dragging = true
+			else:
+				is_dragging = false
+				align_to_grid()
+				if not is_overlapping() and is_within_board():
+					lock()
+	elif event is InputEventMouseMotion and is_dragging:
+		global_position += event.relative
+	elif event is InputEventKey:
+		if event.pressed:
+			if event.scancode == KEY_E:
+				rotate_tetromino(1)
+			elif event.scancode == KEY_Q:
+				rotate_tetromino(-1)
 
+func align_to_grid():
+	var x = round(global_position.x / Board.CELL_SIZE) * Board.CELL_SIZE
+	var y = round(global_position.y / Board.CELL_SIZE) * Board.CELL_SIZE
+	global_position = Vector2(x, y)
 
-func _input(_event):
-	if Input.is_action_just_pressed("left"):
-		move(Vector2.LEFT)
-	elif Input.is_action_just_pressed("right"):
-		move(Vector2.RIGHT)
-	elif Input.is_action_just_pressed("down"):
-		move(Vector2.DOWN)
-	elif Input.is_action_just_pressed("hard_drop"):
-		hard_drop()
-	elif Input.is_action_just_pressed("rotate_left"):
-		rotate_tetromino(-1)
-	elif Input.is_action_just_pressed("rotate_right"):
-		rotate_tetromino(1)
-
-func move(direction: Vector2) -> bool:
-
-	var new_position = calculate_global_position(direction, global_position)
-	if new_position:
-		global_position = new_position
-		if direction != Vector2.DOWN:
-			hard_drop_ghost.call_deferred()
-		return true
-	return false
-	
-func calculate_global_position(direction: Vector2, starting_global_position: Vector2):
-	#TODO: check for collision with other tetrominos
-	print_debug(is_colliding_with_other_tetrominos(direction, starting_global_position))
-	if is_colliding_with_other_tetrominos(direction, starting_global_position):
-		return null
-	#TODO: check for collision with game bounds
-	if !is_within_game_bounds(direction, starting_global_position):
-		return null
-	return starting_global_position + direction * pieces[0].get_size().x
-
-func is_within_game_bounds(direction: Vector2, starting_global_position: Vector2):
+func is_overlapping() -> bool:
 	for piece in pieces:
-		var new_position = piece.position + starting_global_position + direction * piece.get_size()
-		if new_position.x < bounds.get("min_x") || new_position.x > bounds.get("max_x") || new_position.y >= bounds.get("max_y"):
-			return false
-	return true
-
-func is_colliding_with_other_tetrominos(direction: Vector2, starting_global_position: Vector2):
-	for tetromino_piece in other_tetrominoes_pieces:
-		for piece in pieces:
-			if starting_global_position + piece.position + direction * piece.get_size() == tetromino_piece.global_position:
+		for other_piece in other_tetrominoes_pieces:
+			if piece.global_position == other_piece.global_position:
 				return true
 	return false
+
+func is_within_board() -> bool:
+	return global_position.x >= bounds.min_x and global_position.x <= bounds.max_x and global_position.y <= bounds.max_y
+
+func lock():
+	lock_tetromino.emit(self)
+	set_process_input(false)
 
 func rotate_tetromino(direction: int):
 	var original_rotation_index = rotation_index
@@ -125,12 +87,9 @@ func rotate_tetromino(direction: int):
 	
 	rotation_index = wrap(rotation_index + direction, 0, 4)
 	
-	if !test_wall_kicks(rotation_index, direction):
+	if not test_wall_kicks(rotation_index, direction):
 		rotation_index = original_rotation_index
 		apply_rotation(-direction)
-	
-	hard_drop_ghost.call_deferred()
-	
 
 func test_wall_kicks(rotation_index: int, rotation_direction: int):
 	var wall_kick_index = get_wall_kick_index(rotation_index, rotation_direction)
@@ -162,22 +121,24 @@ func apply_rotation(direction: int):
 	for i in pieces.size():
 		var piece = pieces[i]
 		piece.position = tetromino_cells[i] * piece.get_size()
-				
-	
 
-func hard_drop():
-	while(move(Vector2.DOWN)):
-		continue
-	lock()
+func move(translation: Vector2) -> bool:
+	var new_position = global_position + translation * Board.CELL_SIZE
+	if is_within_game_bounds(translation, global_position) and not is_colliding_with_other_tetrominos(translation, global_position):
+		global_position = new_position
+		return true
+	return false
 
-func lock():
-	timer.stop()
-	lock_tetromino.emit(self)
-	set_process_input(false)
-	ghost_tetromino.queue_free()
-	
+func is_within_game_bounds(direction: Vector2, starting_global_position: Vector2):
+	for piece in pieces:
+		var new_position = piece.position + starting_global_position + direction * piece.get_size()
+		if new_position.x < bounds.get("min_x") or new_position.x > bounds.get("max_x") or new_position.y >= bounds.get("max_y"):
+			return false
+	return true
 
-func _on_timer_timeout():
-	var should_lock =  !move(Vector2.DOWN)
-	if should_lock:
-		lock()
+func is_colliding_with_other_tetrominos(direction: Vector2, starting_global_position: Vector2):
+	for tetromino_piece in other_tetrominoes_pieces:
+		for piece in pieces:
+			if starting_global_position + piece.position + direction * piece.get_size() == tetromino_piece.global_position:
+				return true
+	return false
